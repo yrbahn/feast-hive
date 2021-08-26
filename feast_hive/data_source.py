@@ -165,6 +165,11 @@ class HiveSource(DataSource):
             if not cursor.fetchone():
                 raise DataSourceNotFoundException(self.table_ref)
 
+    def get_table_query_string(self) -> str:
+        """Returns a string that can directly be used to reference this table in SQL"""
+        return f"`{self.table_ref}`"
+
+
     @staticmethod
     def source_datatype_to_feast_value_type() -> Callable[[str], ValueType]:
         return hive_to_feast_value_type
@@ -190,3 +195,5 @@ class HiveSource(DataSource):
                 )
 
             return name_type_pairs
+
+
