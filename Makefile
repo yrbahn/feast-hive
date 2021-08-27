@@ -1,5 +1,5 @@
 ROOT_DIR 	:= $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
-
+ 
 format:
 	# Sort
 	cd ${ROOT_DIR}; isort feast_hive/
