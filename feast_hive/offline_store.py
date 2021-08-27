@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+import thrift
+
 from pydantic import StrictBool, StrictInt, StrictStr
 from pydantic.typing import Literal
 
@@ -18,17 +20,13 @@ from feast.registry import Registry
 from feast.repo_config import FeastConfigBaseModel, RepoConfig
 from feast_hive.data_source import HiveSource
 from feast_hive.type_map import hive_to_pa_value_type, pa_to_hive_value_type
-from feast_hive.hive_conf import HIVE_CONF
+
 
 try:
-    import impala
-    from impala.interface import Connection
-    from impala.hiveserver2 import CBatch
-    from impala.dbapi import connect
+    from pyhive.hive import connect, Connection
 
 except ImportError as e:
     from feast.errors import FeastExtrasDependencyImportError
-
     raise FeastExtrasDependencyImportError("hive", str(e))
 
 
@@ -47,34 +45,32 @@ class HiveOfflineStoreConfig(FeastConfigBaseModel):
     database: Optional[StrictStr] = None
     """ The default database. If `None`, the result is implementation-dependent """
 
-    timeout: Optional[StrictInt] = None
-    """ Connection timeout in seconds. Default is no timeout """
-
-    use_ssl: StrictBool = False
-    """ Enable SSL """
-
-    ca_cert: Optional[StrictStr] = None
+    ssl_cert: Optional[StrictStr] = None
     """ Local path to the the third-party CA certificate. If SSL is enabled but
         the certificate is not specified, the server certificate will not be
         validated. """
 
-    auth_mechanism: StrictStr = "PLAIN"
-    """ Specify the authentication mechanism. `'PLAIN'` for unsecured, `'GSSAPI'` for Kerberos and `'LDAP'` for Kerberos with
-        LDAP. """
+    configuration: Optional[Dict] = None
+    """ A dictionary of Hive settings (functionally same as the `set` command)
+    """
 
-    user: Optional[StrictStr] = None
+    auth: Optional[StrictStr] = None
+    """ The value of hive.server2.authentication used by HiveServer2.
+            Defaults to ``NONE``"""
+
+    username: Optional[StrictStr] = None
     """ LDAP user, if applicable. """
 
     password: Optional[StrictStr] = None
     """ LDAP password, if applicable. """
 
-    use_http_transport: StrictBool = False
-    """ Set it to True to use http transport of False to use binary transport. """
+    thrift_transport: Optional[thrift.transport.THttpClient.THttpClient] = None
+    """A ``TTransportBase`` for custom advanced usage.
+            Incompatible with host, port, auth, kerberos_service_name, and password."""
 
-    http_path: StrictStr = ""
-    """ Specify the path in the http URL. Used only when `use_http_transport` is True. """
+    check_hostname: Optional[StrictStr] = None
     
-    kerberos_service_name: StrictStr = ""
+    kerberos_service_name: Optional[StrictStr] = None
     """Authenticate to a particular `impalad` service principal. Uses
         `'impala'` by default."""
 
@@ -118,7 +114,8 @@ class HiveOfflineStore(OfflineStore):
                 WHERE _feast_row = 1
                 """
 
-        return HiveRetrievalJob(_get_connection(config.offline_store), query)
+        conn = _get_connection(config.offline_store)
+        return HiveRetrievalJob(query, conn)
 
     @staticmethod
     def get_historical_features(
@@ -130,99 +127,77 @@ class HiveOfflineStore(OfflineStore):
         project: str,
         full_feature_names: bool = False,
     ) -> RetrievalJob:
+
         assert isinstance(config.offline_store, HiveOfflineStoreConfig)
         conn = _get_connection(config.offline_store)
+        
+        table_name = offline_utils.get_temp_entity_table_name()
 
-        @contextlib.contextmanager
-        def query_generator() -> Iterator[str]:
+        entity_schema = _upload_entity_df_and_get_entity_schema(
+            conn, table_name, entity_df)
 
-            table_name = offline_utils.get_temp_entity_table_name()
+        entity_df_event_timestamp_col = offline_utils.infer_event_timestamp_from_entity_df(
+            entity_schema
+        )
 
-            entity_schema = _upload_entity_df_and_get_entity_schema(
-                conn, table_name, entity_df
-            )
+        expected_join_keys = offline_utils.get_expected_join_keys(
+            project, feature_views, registry
+        )
 
-            print(entity_schema)
-            entity_df_event_timestamp_col = offline_utils.infer_event_timestamp_from_entity_df(
-                entity_schema
-            )
+        offline_utils.assert_expected_columns_in_entity_df(
+            entity_schema, expected_join_keys, entity_df_event_timestamp_col
+        )
 
-            expected_join_keys = offline_utils.get_expected_join_keys(
-                project, feature_views, registry
-            )
+        # Build a query context containing all information required to template the BigQuery SQL query
+        query_context = offline_utils.get_feature_view_query_context(
+            feature_refs, feature_views, registry, project,
+        )
 
-            offline_utils.assert_expected_columns_in_entity_df(
-                entity_schema, expected_join_keys, entity_df_event_timestamp_col
-            )
+        # Generate the BigQuery SQL query from the query context
+        query = offline_utils.build_point_in_time_query(
+            query_context,
+            left_table_query_string=table_name,
+            entity_df_event_timestamp_col=entity_df_event_timestamp_col,
+            query_template=MULTIPLE_FEATURE_VIEW_POINT_IN_TIME_JOIN,
+            full_feature_names=full_feature_names,
+        )
 
-            query_context = offline_utils.get_feature_view_query_context(
-                feature_refs, feature_views, registry, project,
-            )
-
-            query = offline_utils.build_point_in_time_query(
-                query_context,
-                left_table_query_string=table_name,
-                entity_df_event_timestamp_col=entity_df_event_timestamp_col,
-                query_template=MULTIPLE_FEATURE_VIEW_POINT_IN_TIME_JOIN,
-                full_feature_names=full_feature_names,
-            )
-
-            yield query
-
-            with conn.cursor() as cursor:
-                cursor.execute(f"DROP TABLE {table_name}", configuration=HIVE_CONF)
-
-        return HiveRetrievalJob(conn, query_generator)
+        return HiveRetrievalJob(query, conn)
 
 
 class HiveRetrievalJob(RetrievalJob):
-    def __init__(
-        self, conn: Connection, query: Union[str, Callable[[], ContextManager[str]]],
-    ):
-        if not isinstance(query, str):
-            self._query_generator = query
-        else:
-
-            @contextlib.contextmanager
-            def query_generator() -> Iterator[str]:
-                assert isinstance(query, str)
-                yield query
-
-            self._query_generator = query_generator
-
-        self._conn = conn
+    def __init__(self, query, conn):
+        self.query = query
+        self.conn = conn
 
     def to_df(self) -> pd.DataFrame:
-        return self.to_arrow().to_pandas()
+        with self.conn.cursor() as cursor:
+            cursor.execute(self.query)
+            rows = cursor.fetchall()
+            col_names = [desc[0] for desc in cursor.description]
+            return pd.DataFrame(data=rows,columns=col_names)
 
     def to_arrow(self) -> pa.Table:
-        with self._query_generator() as query:
-            with self._conn.cursor() as cursor:
-                print("query:", query)
-                cursor.execute(query, configuration=HIVE_CONF)
-                batches = cursor.fetchcolumnar()
-                pa_batches = [
-                    self._convert_hive_batch_to_arrow_batch(b) for b in batches
-                ]
-                return pa.Table.from_batches(pa_batches)
+        return pa.Table.from_pandas(self.to_arrow())
 
     @staticmethod
-    def _convert_hive_batch_to_arrow_batch(
-        hive_batch: CBatch,
-    ) -> pa.RecordBatch:
-        return pa.record_batch(
-            [column.values for column in hive_batch.columns],
-            pa.schema(
-                [
-                    (field_info[0], hive_to_pa_value_type(field_info[1]))
-                    for field_info in hive_batch.schema
-                ]
-            ),
-        )
+    def resolve_type(field_type):
+        if 'varchar' in field_type:
+            field_type = 'string'
+        if 'bigint' == field_type:
+            field_type = 'int64'
+        if 'date' == field_type:
+            field_type = 'date32'
+        if 'boolean' == field_type:
+            field_type = 'bool'
+        return field_type
+
+       
 
 
 def _get_connection(offline_store_config: HiveOfflineStoreConfig) -> Connection:
     assert isinstance(offline_store_config, HiveOfflineStoreConfig)
+    print(offline_store_config.dict)
     return connect(**offline_store_config.dict(exclude={"type"}))
 
 
@@ -234,7 +209,7 @@ def _upload_entity_df_and_get_entity_schema(
         return dict(zip(entity_df.columns, entity_df.dtypes))
     elif isinstance(entity_df, str):
         with conn.cursor() as cursor:
-            cursor.execute(f"CREATE TEMPORARY TABLE {table_name} AS ({entity_df})", configuration=HIVE_CONF)
+            cursor.execute(f"CREATE TEMPORARY TABLE {table_name} AS ({entity_df})")
         limited_entity_df = HiveRetrievalJob(
             conn, f"SELECT * FROM {table_name} LIMIT 1"
         ).to_df()
@@ -275,7 +250,7 @@ def _upload_entity_df(
             )
             """
         print(create_entity_table_sql)
-        cursor.execute(create_entity_table_sql, configuration=HIVE_CONF)
+        cursor.execute(create_entity_table_sql)
 
         def preprocess_value(raw_value, col_type):
             col_type = col_type.lower()
@@ -311,7 +286,7 @@ def _upload_entity_df(
                 VALUES ({'), ('.join([', '.join(chunk_row) for chunk_row in chunk_data])})
             """
             print(entity_chunk_insert_sql)
-            cursor.execute(entity_chunk_insert_sql, configuration=HIVE_CONF)
+            cursor.execute(entity_chunk_insert_sql)
 
 
 # This query is based on sdk/python/feast/infra/offline_stores/redshift.py:MULTIPLE_FEATURE_VIEW_POINT_IN_TIME_JOIN
@@ -369,9 +344,10 @@ WITH entity_dataframe AS (
             {{ feature }} as {% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}{% if loop.last %}{% else %}, {% endif %}
         {% endfor %}
     FROM {{ featureview.table_subquery }}
-    WHERE {{ featureview.event_timestamp_column }} <= (SELECT MAX(entity_timestamp) FROM entity_dataframe)
+    , (SELECT MAX(entity_timestamp) as max_et, MIN(entity_timestamp) as min_et FROM entity_dataframe) t2
+    WHERE {{ featureview.event_timestamp_column }} <= t2.max_et
     {% if featureview.ttl == 0 %}{% else %}
-    AND {{ featureview.event_timestamp_column }} >= (SELECT MIN(entity_timestamp) FROM entity_dataframe) - {{ featureview.ttl }} * interval '1' second
+    AND {{ featureview.event_timestamp_column }} >= from_unixtime(unix_timestamp(min_et) - {{ featureview.ttl }})
     {% endif %}
 ),
 
@@ -382,11 +358,10 @@ WITH entity_dataframe AS (
         entity_dataframe.{{featureview.name}}__entity_row_unique_id
     FROM {{ featureview.name }}__subquery AS subquery
     INNER JOIN {{ featureview.name }}__entity_dataframe AS entity_dataframe
-    ON TRUE
-        AND subquery.event_timestamp <= entity_dataframe.entity_timestamp
-
+    WHERE
+        subquery.event_timestamp <= entity_dataframe.entity_timestamp
         {% if featureview.ttl == 0 %}{% else %}
-        AND subquery.event_timestamp >= entity_dataframe.entity_timestamp - {{ featureview.ttl }} * interval '1' second
+        AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp) - {{ featureview.ttl }})
         {% endif %}
 
         {% for entity in featureview.entities %}
@@ -421,10 +396,15 @@ WITH entity_dataframe AS (
             ,ANY_VALUE(created_timestamp) AS created_timestamp
         {% endif %}
 
-    FROM {{ featureview.name }}__base
+    FROM {{ featureview.name }}__base as t1
     {% if featureview.created_timestamp_column %}
-        INNER JOIN {{ featureview.name }}__dedup
-        USING ({{featureview.name}}__entity_row_unique_id, event_timestamp, created_timestamp)
+        , {{ featureview.name }}__dedup as t2
+        WHERE 
+            t1.{{featureview.name}}__entity_row_unique_id = t2.{{featureview.name}}__entity_row_unique_id 
+        AND
+            t1.event_timestamp = t2.event_timestamp
+        AND 
+            t1.created_timestamp = t2.created_timestamp
     {% endif %}
 
     GROUP BY {{featureview.name}}__entity_row_unique_id
@@ -436,14 +416,14 @@ WITH entity_dataframe AS (
 {{ featureview.name }}__cleaned AS (
     SELECT base.*
     FROM {{ featureview.name }}__base as base
-    INNER JOIN {{ featureview.name }}__latest
-    USING(
-        {{featureview.name}}__entity_row_unique_id,
-        event_timestamp
+    INNER JOIN {{ featureview.name }}__latest as t2
+    ON
+        base.{{featureview.name}}__entity_row_unique_id = t2.{{featureview.name}}__entity_row_unique_id
+    AND
+        base.event_timestamp = t2.event_timestamp
         {% if featureview.created_timestamp_column %}
-            ,created_timestamp
+    AND base.created_timestamp = t2.created_timestamp
         {% endif %}
-    )
 ){% if loop.last %}{% else %}, {% endif %}
 
 
@@ -453,7 +433,7 @@ WITH entity_dataframe AS (
  -- The entity_dataframe dataset being our source of truth here.
 
 SELECT *
-FROM entity_dataframe
+FROM entity_dataframe as t1
 {% for featureview in featureviews %}
 LEFT JOIN (
     SELECT
@@ -462,6 +442,6 @@ LEFT JOIN (
             ,{% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}
         {% endfor %}
     FROM {{ featureview.name }}__cleaned
-) USING ({{featureview.name}}__entity_row_unique_id)
+) as t2 ON (t1.{{featureview.name}}__entity_row_unique_id = t2.{{featureview.name}}__entity_row_unique_id)
 {% endfor %}
 """
