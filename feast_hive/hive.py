@@ -18,8 +18,8 @@ from feast.infra.offline_stores import offline_utils
 from feast.infra.offline_stores.offline_store import OfflineStore, RetrievalJob
 from feast.registry import Registry
 from feast.repo_config import FeastConfigBaseModel, RepoConfig
-from feast_hive.data_source import HiveSource
-from feast_hive.type_map import hive_to_pa_value_type, pa_to_hive_value_type
+from feast_hive.hive_source import HiveSource
+from feast_hive.hive_type_map import hive_to_pa_value_type, pa_to_hive_value_type
 
 
 try:
@@ -45,11 +45,6 @@ class HiveOfflineStoreConfig(FeastConfigBaseModel):
     database: Optional[StrictStr] = None
     """ The default database. If `None`, the result is implementation-dependent """
 
-    ssl_cert: Optional[StrictStr] = None
-    """ Local path to the the third-party CA certificate. If SSL is enabled but
-        the certificate is not specified, the server certificate will not be
-        validated. """
-
     configuration: Optional[Dict] = None
     """ A dictionary of Hive settings (functionally same as the `set` command)
     """
@@ -64,12 +59,6 @@ class HiveOfflineStoreConfig(FeastConfigBaseModel):
     password: Optional[StrictStr] = None
     """ LDAP password, if applicable. """
 
-    thrift_transport: Optional[thrift.transport.THttpClient.THttpClient] = None
-    """A ``TTransportBase`` for custom advanced usage.
-            Incompatible with host, port, auth, kerberos_service_name, and password."""
-
-    check_hostname: Optional[StrictStr] = None
-    
     kerberos_service_name: Optional[StrictStr] = None
     """Authenticate to a particular `impalad` service principal. Uses
         `'impala'` by default."""
