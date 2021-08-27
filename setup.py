@@ -10,7 +10,7 @@ with open("LICENSE") as f:
 
 INSTALL_REQUIRE = [
     "feast>=0.12.0",
-    "impyla==0.17.0",
+    "pyhive==0.6.3",
 ]
 
 TEST_REQUIRE = ["pytest==6.0.0"]
