@@ -64,7 +64,6 @@ class HiveOptions:
         return hive_options_proto
 
 
-
 class HiveSource(DataSource):
     def __init__(
         self,

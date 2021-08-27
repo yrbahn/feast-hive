@@ -55,7 +55,7 @@ def pa_to_hive_value_type(pa_type_as_str: str) -> str:
         "string": "string",
     }
     return type_map[pa_type_as_str]
-
+ 
 
 def hive_to_pa_value_type(hive_type_as_str: str) -> str:
     hive_type_as_str = hive_type_as_str.lower()

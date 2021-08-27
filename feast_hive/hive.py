@@ -181,8 +181,6 @@ class HiveRetrievalJob(RetrievalJob):
             field_type = 'bool'
         return field_type
 
-       
-
 
 def _get_connection(offline_store_config: HiveOfflineStoreConfig) -> Connection:
     assert isinstance(offline_store_config, HiveOfflineStoreConfig)
