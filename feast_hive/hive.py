@@ -184,7 +184,6 @@ class HiveRetrievalJob(RetrievalJob):
 
 def _get_connection(offline_store_config: HiveOfflineStoreConfig) -> Connection:
     assert isinstance(offline_store_config, HiveOfflineStoreConfig)
-    print(offline_store_config.dict)
     return connect(**offline_store_config.dict(exclude={"type"}))
 
 
@@ -236,7 +235,6 @@ def _upload_entity_df(
               {', '.join([f'{col_name} {col_type}' for col_name, col_type in hive_schema])}
             )
             """
-        print(create_entity_table_sql)
         cursor.execute(create_entity_table_sql)
 
         def preprocess_value(raw_value, col_type):
@@ -272,7 +270,6 @@ def _upload_entity_df(
                 INSERT INTO TABLE {table_name} ({', '.join([f'{col_name}' for col_name, col_type in hive_schema])})
                 VALUES ({'), ('.join([', '.join(chunk_row) for chunk_row in chunk_data])})
             """
-            print(entity_chunk_insert_sql)
             cursor.execute(entity_chunk_insert_sql)
 
 
