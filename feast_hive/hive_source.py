@@ -1,12 +1,13 @@
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import pickle
+from pyhive.hive import connect
 from feast import RepoConfig, ValueType
 from feast.data_source import DataSource
 from feast.errors import DataSourceNotFoundException
 from feast.protos.feast.core.DataSource_pb2 import DataSource as DataSourceProto
 from feast_hive.hive_type_map import hive_to_feast_value_type
- 
+
 
 class HiveOptions:
     """
@@ -148,14 +149,12 @@ class HiveSource(DataSource):
         )
 
     def validate(self, config: RepoConfig):
-        from feast_hive.offline_store import HiveOfflineStoreConfig
+
+        from feast_hive.hive import HiveOfflineStoreConfig
 
         assert isinstance(config.offline_store, HiveOfflineStoreConfig)
 
-        #from impala.dbapi import connect
-        from pyhive import hive
-
-        with hive.connect(**config.offline_store.dict(exclude={"type"})) as conn:
+        with connect(**config.offline_store.dict(exclude={"type"})) as conn:
             cursor = conn.cursor()
             table_ref_splits = self.table_ref.rsplit(".", 1)
             if len(table_ref_splits) == 2:
@@ -177,13 +176,12 @@ class HiveSource(DataSource):
     def get_table_column_names_and_types(
         self, config: RepoConfig
     ) -> Iterable[Tuple[str, str]]:
-        from feast_hive.offline_store import HiveOfflineStoreConfig
+
+        from feast_hive.hive import HiveOfflineStoreConfig
 
         assert isinstance(config.offline_store, HiveOfflineStoreConfig)
 
-        #from impala.dbapi import connect
-        from pyhive import hive
-        with hive.connect(**config.offline_store.dict(exclude={"type"})) as conn:
+        with connect(**config.offline_store.dict(exclude={"type"})) as conn:
             cursor = conn.cursor()
             cursor.execute(f"desc {self.table_ref}")
             name_type_pairs = []

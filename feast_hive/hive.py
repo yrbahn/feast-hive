@@ -318,7 +318,6 @@ WITH entity_dataframe AS (
 
 --  The output of this CTE will contain all the necessary information and already filtered out most
 --  of the data that is not relevant.
-
 {{ featureview.name }}__subquery AS (
     SELECT
         {{ featureview.event_timestamp_column }} as event_timestamp,
@@ -328,10 +327,16 @@ WITH entity_dataframe AS (
             {{ feature }} as {% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}{% if loop.last %}{% else %}, {% endif %}
         {% endfor %}
     FROM {{ featureview.table_subquery }}
-    , (SELECT MAX(entity_timestamp) as max_et, MIN(entity_timestamp) as min_et FROM entity_dataframe) t2
-    WHERE {{ featureview.event_timestamp_column }} <= t2.max_et
+    LEFT JOIN (
+        SELECT MAX(entity_timestamp) as max_entity_timestamp
+               {% if featureview.ttl == 0 %}{% else %}
+               , from_unixtime(unix_timestamp(MIN(entity_timestamp)) - {{ featureview.ttl }}) as min_entity_timestamp
+               {% endif %}
+        FROM entity_dataframe
+    ) as temp
+    WHERE {{ featureview.event_timestamp_column }} <= max_entity_timestamp
     {% if featureview.ttl == 0 %}{% else %}
-    AND {{ featureview.event_timestamp_column }} >= from_unixtime(unix_timestamp(min_et) - {{ featureview.ttl }})
+    AND {{ featureview.event_timestamp_column }} >=  min_entity_timestamp
     {% endif %}
 ),
 
@@ -342,16 +347,18 @@ WITH entity_dataframe AS (
         entity_dataframe.{{featureview.name}}__entity_row_unique_id
     FROM {{ featureview.name }}__subquery AS subquery
     INNER JOIN {{ featureview.name }}__entity_dataframe AS entity_dataframe
-    WHERE
+    ON (
         subquery.event_timestamp <= entity_dataframe.entity_timestamp
         {% if featureview.ttl == 0 %}{% else %}
         AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp) - {{ featureview.ttl }})
         {% endif %}
-
         {% for entity in featureview.entities %}
         AND subquery.{{ entity }} = entity_dataframe.{{ entity }}
         {% endfor %}
+    )
 ),
+
+
 
 -- 2. If the `created_timestamp_column` has been set, we need to
 -- deduplicate the data first. This is done by calculating the
@@ -371,53 +378,50 @@ WITH entity_dataframe AS (
 
 -- 3. The data has been filtered during the first CTE "*__base"
 -- Thus we only need to compute the latest timestamp of each feature.
-
 {{ featureview.name }}__latest AS (
     SELECT
-        {{featureview.name}}__entity_row_unique_id,
-        MAX(event_timestamp) AS event_timestamp
+        base.{{featureview.name}}__entity_row_unique_id,
+        MAX(base.event_timestamp) AS event_timestamp
         {% if featureview.created_timestamp_column %}
-            ,ANY_VALUE(created_timestamp) AS created_timestamp
+            ,MAX(base.created_timestamp) AS created_timestamp
         {% endif %}
-
-    FROM {{ featureview.name }}__base as t1
+    FROM {{ featureview.name }}__base AS base
     {% if featureview.created_timestamp_column %}
-        , {{ featureview.name }}__dedup as t2
-        WHERE 
-            t1.{{featureview.name}}__entity_row_unique_id = t2.{{featureview.name}}__entity_row_unique_id 
-        AND
-            t1.event_timestamp = t2.event_timestamp
-        AND 
-            t1.created_timestamp = t2.created_timestamp
+        INNER JOIN {{ featureview.name }}__dedup AS dedup
+        ON (
+            dedup.{{featureview.name}}__entity_row_unique_id=base.{{featureview.name}}__entity_row_unique_id
+            AND dedup.event_timestamp=base.event_timestamp
+            AND dedup.created_timestamp=base.created_timestamp
+        )
     {% endif %}
-
-    GROUP BY {{featureview.name}}__entity_row_unique_id
+    GROUP BY base.{{featureview.name}}__entity_row_unique_id
 ),
+
 
 -- 4. Once we know the latest value of each feature for a given timestamp,
 -- we can join again the data back to the original "base" dataset
 
 {{ featureview.name }}__cleaned AS (
     SELECT base.*
-    FROM {{ featureview.name }}__base as base
-    INNER JOIN {{ featureview.name }}__latest as t2
-    ON
-        base.{{featureview.name}}__entity_row_unique_id = t2.{{featureview.name}}__entity_row_unique_id
-    AND
-        base.event_timestamp = t2.event_timestamp
+    FROM {{ featureview.name }}__base AS base
+    INNER JOIN {{ featureview.name }}__latest AS latest
+    ON (
+        base.{{featureview.name}}__entity_row_unique_id=latest.{{featureview.name}}__entity_row_unique_id
+        AND base.event_timestamp=latest.event_timestamp
         {% if featureview.created_timestamp_column %}
-    AND base.created_timestamp = t2.created_timestamp
+            AND base.created_timestamp=latest.created_timestamp
         {% endif %}
+    )
 ){% if loop.last %}{% else %}, {% endif %}
-
 
 {% endfor %}
  
  -- Joins the outputs of multiple time travel joins to a single table.
  -- The entity_dataframe dataset being our source of truth here.
 
+ -- SELECT `(entity_timestamp|{% for featureview in featureviews %}{{featureview.name}}__entity_row_unique_id{% if loop.last %}{% else %}|{% endif %}{% endfor %})?+.+`
 SELECT *
-FROM entity_dataframe as t1
+FROM entity_dataframe
 {% for featureview in featureviews %}
 LEFT JOIN (
     SELECT
@@ -426,6 +430,10 @@ LEFT JOIN (
             ,{% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}
         {% endfor %}
     FROM {{ featureview.name }}__cleaned
-) as t2 ON (t1.{{featureview.name}}__entity_row_unique_id = t2.{{featureview.name}}__entity_row_unique_id)
+) AS {{ featureview.name }}__joined 
+ON (
+    {{ featureview.name }}__joined.{{featureview.name}}__entity_row_unique_id=entity_dataframe.{{featureview.name}}__entity_row_unique_id
+)
 {% endfor %}
+
 """
