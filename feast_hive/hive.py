@@ -347,7 +347,7 @@ WITH entity_dataframe AS (
         entity_dataframe.{{featureview.name}}__entity_row_unique_id
     FROM {{ featureview.name }}__subquery AS subquery
     INNER JOIN {{ featureview.name }}__entity_dataframe AS entity_dataframe
-    ON (
+    WHERE (
         subquery.event_timestamp <= entity_dataframe.entity_timestamp
         {% if featureview.ttl == 0 %}{% else %}
         AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp) - {{ featureview.ttl }})
