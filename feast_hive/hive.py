@@ -327,7 +327,7 @@ WITH entity_dataframe AS (
             {{ feature }} as {% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}{% if loop.last %}{% else %}, {% endif %}
         {% endfor %}
     FROM {{ featureview.table_subquery }}
-    LEFT JOIN (
+    INNER JOIN (
         SELECT MAX(entity_timestamp) as max_entity_timestamp
                {% if featureview.ttl == 0 %}{% else %}
                , from_unixtime(unix_timestamp(MIN(entity_timestamp)) - {{ featureview.ttl }}) as min_entity_timestamp
