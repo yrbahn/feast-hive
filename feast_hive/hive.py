@@ -328,7 +328,7 @@ WITH entity_dataframe AS (
         {% endfor %}
     FROM {{ featureview.table_subquery }}
     INNER JOIN (
-        SELECT MAX(entity_timestamp) as max_entity_timestamp
+        SELECT date_format(MAX(entity_timestamp), 'yyyy-MM-dd HH:mm:ss') as max_entity_timestamp
                {% if featureview.ttl == 0 %}{% else %}
                , from_unixtime(unix_timestamp(MIN(entity_timestamp)) - {{ featureview.ttl }}) as min_entity_timestamp
                {% endif %}
@@ -348,7 +348,7 @@ WITH entity_dataframe AS (
     FROM {{ featureview.name }}__subquery AS subquery
     INNER JOIN {{ featureview.name }}__entity_dataframe AS entity_dataframe
     WHERE (
-        subquery.event_timestamp <= entity_dataframe.entity_timestamp
+        subquery.event_timestamp <= date_format(entity_dataframe.entity_timestamp, 'yyyy-MM-dd HH:mm:ss')
         {% if featureview.ttl == 0 %}{% else %}
         AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp) - {{ featureview.ttl }})
         {% endif %}
