@@ -20,6 +20,7 @@ DEV_REQUIRE = [
     "black==19.10b0",
     "isort>=5",
     "mypy==0.790",
+    "thrift",
 ]
 
 setup(

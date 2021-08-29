@@ -79,7 +79,7 @@ class HiveOfflineStore(OfflineStore):
         assert isinstance(config.offline_store, HiveOfflineStoreConfig)
         assert isinstance(data_source, HiveSource)
 
-        from_expression = data_source.table
+        from_expression = data_source.get_table_query_string()
 
         partition_by_join_key_string = ", ".join(join_key_columns)
         if partition_by_join_key_string != "":
@@ -96,11 +96,11 @@ class HiveOfflineStore(OfflineStore):
                 SELECT {field_string}
                 FROM (
                     SELECT {field_string},
-                    ROW_NUMBER() OVER({partition_by_join_key_string} ORDER BY {timestamp_desc_string}) AS _feast_row
+                    ROW_NUMBER() OVER({partition_by_join_key_string} ORDER BY {timestamp_desc_string}) AS feast_row
                     FROM {from_expression} t1
                     WHERE {event_timestamp_column} BETWEEN TIMESTAMP('{start_date}') AND TIMESTAMP('{end_date}')
                 ) t2
-                WHERE _feast_row = 1
+                WHERE feast_row = 1
                 """
 
         conn = _get_connection(config.offline_store)
@@ -167,7 +167,7 @@ class HiveRetrievalJob(RetrievalJob):
             return pd.DataFrame(data=rows,columns=col_names)
 
     def to_arrow(self) -> pa.Table:
-        return pa.Table.from_pandas(self.to_arrow())
+        return pa.Table.from_pandas(self.to_df())
 
     @staticmethod
     def resolve_type(field_type):
@@ -347,14 +347,16 @@ WITH entity_dataframe AS (
         entity_dataframe.{{featureview.name}}__entity_row_unique_id
     FROM {{ featureview.name }}__subquery AS subquery
     INNER JOIN {{ featureview.name }}__entity_dataframe AS entity_dataframe
+    ON ( TRUE
+    {% for entity in featureview.entities %}
+    AND subquery.{{ entity }} = entity_dataframe.{{ entity }}
+    {% endfor %}
+    )
     WHERE (
         subquery.event_timestamp <= date_format(entity_dataframe.entity_timestamp, 'yyyy-MM-dd HH:mm:ss')
         {% if featureview.ttl == 0 %}{% else %}
         AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp) - {{ featureview.ttl }})
         {% endif %}
-        {% for entity in featureview.entities %}
-        AND subquery.{{ entity }} = entity_dataframe.{{ entity }}
-        {% endfor %}
     )
 ),
 
