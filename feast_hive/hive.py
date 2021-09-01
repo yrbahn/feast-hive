@@ -1,4 +1,4 @@
-import contextlib
+
 from datetime import datetime
 from typing import Callable, ContextManager, Dict, Iterator, List, Optional, Union
 
@@ -63,6 +63,8 @@ class HiveOfflineStoreConfig(FeastConfigBaseModel):
     """Authenticate to a particular `impalad` service principal. Uses
         `'impala'` by default."""
 
+    date_format: StrictStr = 'yyyyMMdd hhmmss'
+
 
 class HiveOfflineStore(OfflineStore):
     @staticmethod
@@ -98,7 +100,7 @@ class HiveOfflineStore(OfflineStore):
                     SELECT {field_string},
                     ROW_NUMBER() OVER({partition_by_join_key_string} ORDER BY {timestamp_desc_string}) AS feast_row
                     FROM {from_expression} t1
-                    WHERE {event_timestamp_column} BETWEEN TIMESTAMP('{start_date}') AND TIMESTAMP('{end_date}')
+                    WHERE {event_timestamp_column} >= date_format('{start_date}', '{config.offline_store.date_format}')  AND  {event_timestamp_column} <= date_format('{end_date}', '{config.offline_store.date_format}')
                 ) t2
                 WHERE feast_row = 1
                 """
@@ -147,7 +149,8 @@ class HiveOfflineStore(OfflineStore):
             query_context,
             left_table_query_string=table_name,
             entity_df_event_timestamp_col=entity_df_event_timestamp_col,
-            query_template=MULTIPLE_FEATURE_VIEW_POINT_IN_TIME_JOIN,
+            query_template=MULTIPLE_FEATURE_VIEW_POINT_IN_TIME_JOIN.replace(
+                '__DATE_FORMAT__', config.offline_store.date_format),
             full_feature_names=full_feature_names,
         )
 
@@ -184,7 +187,7 @@ class HiveRetrievalJob(RetrievalJob):
 
 def _get_connection(offline_store_config: HiveOfflineStoreConfig) -> Connection:
     assert isinstance(offline_store_config, HiveOfflineStoreConfig)
-    return connect(**offline_store_config.dict(exclude={"type"}))
+    return connect(**offline_store_config.dict(exclude={"type", "date_format"}))
 
 
 def _upload_entity_df_and_get_entity_schema(
@@ -328,9 +331,9 @@ WITH entity_dataframe AS (
         {% endfor %}
     FROM {{ featureview.table_subquery }}
     INNER JOIN (
-        SELECT date_format(MAX(entity_timestamp), 'yyyy-MM-dd HH:mm:ss') as max_entity_timestamp
+        SELECT MAX(entity_timestamp) as max_entity_timestamp
                {% if featureview.ttl == 0 %}{% else %}
-               , from_unixtime(unix_timestamp(MIN(entity_timestamp)) - {{ featureview.ttl }}) as min_entity_timestamp
+               , from_unixtime(unix_timestamp(MIN(entity_timestamp), '__DATE_FORMAT__') - {{ featureview.ttl }}, '__DATE_FORMAT__') as min_entity_timestamp
                {% endif %}
         FROM entity_dataframe
     ) as temp
@@ -353,9 +356,9 @@ WITH entity_dataframe AS (
     {% endfor %}
     )
     WHERE (
-        subquery.event_timestamp <= date_format(entity_dataframe.entity_timestamp, 'yyyy-MM-dd HH:mm:ss')
+        subquery.event_timestamp <= entity_dataframe.entity_timestamp
         {% if featureview.ttl == 0 %}{% else %}
-        AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp) - {{ featureview.ttl }})
+        AND subquery.event_timestamp >= from_unixtime(unix_timestamp(entity_dataframe.entity_timestamp, '__DATE_FORMAT__') - {{ featureview.ttl }}, '__DATE_FORMAT__')
         {% endif %}
     )
 ),
@@ -414,28 +417,30 @@ WITH entity_dataframe AS (
             AND base.created_timestamp=latest.created_timestamp
         {% endif %}
     )
-){% if loop.last %}{% else %}, {% endif %}
-
-{% endfor %}
+),
  
  -- Joins the outputs of multiple time travel joins to a single table.
  -- The entity_dataframe dataset being our source of truth here.
 
- -- SELECT `(entity_timestamp|{% for featureview in featureviews %}{{featureview.name}}__entity_row_unique_id{% if loop.last %}{% else %}|{% endif %}{% endfor %})?+.+`
-SELECT *
-FROM entity_dataframe
-{% for featureview in featureviews %}
-LEFT JOIN (
-    SELECT
-        {{featureview.name}}__entity_row_unique_id
-        {% for feature in featureview.features %}
-            ,{% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}
-        {% endfor %}
-    FROM {{ featureview.name }}__cleaned
-) AS {{ featureview.name }}__joined 
-ON (
-    {{ featureview.name }}__joined.{{featureview.name}}__entity_row_unique_id=entity_dataframe.{{featureview.name}}__entity_row_unique_id
-)
+{{ featureview.name }}__final AS (
+    SELECT `(entity_timestamp|{% for featureview in featureviews %}{{featureview.name}}__entity_row_unique_id{% if loop.last %}{% else %}|{% endif %}{% endfor %})?+.+`
+    FROM entity_dataframe
+    {% for featureview in featureviews %}
+    LEFT JOIN (
+        SELECT
+            {{featureview.name}}__entity_row_unique_id
+            {% for feature in featureview.features %}
+                ,{% if full_feature_names %}{{ featureview.name }}__{{feature}}{% else %}{{ feature }}{% endif %}
+            {% endfor %}
+        FROM {{ featureview.name }}__cleaned
+    ) AS {{ featureview.name }}__joined 
+    ON (
+        {{ featureview.name }}__joined.{{featureview.name}}__entity_row_unique_id=entity_dataframe.{{featureview.name}}__entity_row_unique_id
+    )
+    {% endfor %}
+){% if loop.last %}{% else %}, {% endif %}
+
 {% endfor %}
 
 """
+

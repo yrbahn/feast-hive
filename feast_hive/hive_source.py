@@ -154,7 +154,7 @@ class HiveSource(DataSource):
 
         assert isinstance(config.offline_store, HiveOfflineStoreConfig)
 
-        with connect(**config.offline_store.dict(exclude={"type"})) as conn:
+        with connect(**config.offline_store.dict(exclude={"type", "date_format"})) as conn:
             cursor = conn.cursor()
             table_ref_splits = self.table_ref.rsplit(".", 1)
             if len(table_ref_splits) == 2:
@@ -181,7 +181,7 @@ class HiveSource(DataSource):
 
         assert isinstance(config.offline_store, HiveOfflineStoreConfig)
 
-        with connect(**config.offline_store.dict(exclude={"type"})) as conn:
+        with connect(**config.offline_store.dict(exclude={"type", "date_format"})) as conn:
             cursor = conn.cursor()
             cursor.execute(f"desc {self.table_ref}")
             name_type_pairs = []
