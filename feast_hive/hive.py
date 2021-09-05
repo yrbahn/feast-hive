@@ -417,13 +417,12 @@ WITH entity_dataframe AS (
             AND base.created_timestamp=latest.created_timestamp
         {% endif %}
     )
-),
+){% if loop.last %}{% else %}, {% endif %}
  
  -- Joins the outputs of multiple time travel joins to a single table.
  -- The entity_dataframe dataset being our source of truth here.
 
-{{ featureview.name }}__final AS (
-    SELECT `(entity_timestamp|{% for featureview in featureviews %}{{featureview.name}}__entity_row_unique_id{% if loop.last %}{% else %}|{% endif %}{% endfor %})?+.+`
+SELECT `(entity_timestamp|{% for featureview in featureviews %}{{featureview.name}}__entity_row_unique_id{% if loop.last %}{% else %}|{% endif %}{% endfor %})?+.+`
     FROM entity_dataframe
     {% for featureview in featureviews %}
     LEFT JOIN (
@@ -436,9 +435,7 @@ WITH entity_dataframe AS (
     ) AS {{ featureview.name }}__joined 
     ON (
         {{ featureview.name }}__joined.{{featureview.name}}__entity_row_unique_id=entity_dataframe.{{featureview.name}}__entity_row_unique_id
-    )
-    {% endfor %}
-){% if loop.last %}{% else %}, {% endif %}
+)
 
 {% endfor %}
 
