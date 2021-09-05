@@ -198,9 +198,9 @@ def _upload_entity_df_and_get_entity_schema(
         return dict(zip(entity_df.columns, entity_df.dtypes))
     elif isinstance(entity_df, str):
         with conn.cursor() as cursor:
-            cursor.execute(f"CREATE TEMPORARY TABLE {table_name} AS ({entity_df})")
+            cursor.execute(f"CREATE TEMPORARY TABLE {table_name} AS {entity_df}")
         limited_entity_df = HiveRetrievalJob(
-            conn, f"SELECT * FROM {table_name} LIMIT 1"
+            f"SELECT * FROM {table_name} LIMIT 1", conn
         ).to_df()
         return dict(zip(limited_entity_df.columns, limited_entity_df.dtypes))
     else:
